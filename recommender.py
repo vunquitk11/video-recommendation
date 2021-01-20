@@ -9,13 +9,15 @@ from collections import Counter
 pd.options.mode.chained_assignment = None
 
 tf_vectorizer = TfidfVectorizer(
-    min_df=3, max_features=3000,
+    min_df=3, max_features=1000,
     strip_accents="unicode", analyzer="word",
     token_pattern=r"\w{3,}",
     ngram_range=(1, 3),
     stop_words="english")
 
 def consine_sim(x1, x2):
+    if x1 is None or x2 is None:
+        return 0
     return 1 - scipy.spatial.distance.cosine(x1, x2)
 
 
@@ -31,9 +33,6 @@ def sort_by_score(videos):
     videos = [dict(vid) for vid in set(tuple(item.items()) for item in videos)]
     videos = sorted(videos, key=lambda x: x["score"], reverse=True)
 
-    return videos
-
-
 def filter_viewed_videos(videos, viewed_ids):
     res = []
     for vid in videos:
@@ -42,6 +41,11 @@ def filter_viewed_videos(videos, viewed_ids):
 
     return res
 
+def safe_get_list(li, idx):
+    try:
+        return li[idx]
+    except:
+        return None
 
 def to_str(list_of_int):
     return [str(c) for c in list_of_int]
@@ -91,7 +95,8 @@ class Recommender:
         )
         self.video_df = self.build_df(
             "videos",
-            "id,video_src,thumbnail,name,description,duration,tags,category_id"
+            "id,video_src,thumbnail,name,description,duration,tags,category_id,comments," +
+            "likes,views,dislikes"
         )
 
     def save_all_dataframe(self):
@@ -113,7 +118,12 @@ class Recommender:
         return data
 
     def build_df(self, table, columns, condition=""):
-        fpath = self._p(table + ".csv")
+        csv_name = {
+            "activities": "activity_df",
+            "watch_histories": "history_df",
+            "videos": "video_df"
+        }[table]
+        fpath = self._p(csv_name + ".csv")
         if not self.override and os.path.isfile(fpath):
             return pd.read_csv(fpath)
 
@@ -123,7 +133,9 @@ class Recommender:
 
         data = self.find(sql)
 
+        data = np.array(data)
         df = pd.DataFrame(data)
+
         df.columns = columns.split(",")
         return df
 
@@ -131,6 +143,7 @@ class Recommender:
         if not self.override:
             return
 
+        print("Start building feature vectors")
         self.init_all_dataframe()
         # Fill NaN values by empty string
         self.video_df["description"].fillna("", inplace=True)
@@ -188,23 +201,25 @@ class Recommender:
         for vid_id in viewed_ids:
             videos += filter_viewed_videos(self.recommend_for_vid(vid_id, 10), viewed_ids)
 
-        if len(videos) and len(videos) < limit:
+        while len(videos) < limit:
             rest = limit - len(videos)
             videos += self.recommend_for_vid(videos[0]["video_id"], rest, update_db=False)
 
         # This function use for calculate category feature
-        weighted_by_category(videos, category_map) 
-        videos = sort_by_score(videos)
+        # weighted_by_category(videos, category_map) 
+        sort_by_score(videos)
 
+        videos = videos[:limit]
         try:
             rec_ids = f"[{','.join([str(vid['video_id']) for vid in videos])}]"
             # Insert to db
             update_sql = f"UPDATE users SET array_recommend_video = '{rec_ids}' where id = {user_id}"
             self.update(update_sql)
+            print("data base updated")
         except Exception as e:
             print("Could not update users table", str(e))
 
-        return videos[:limit]
+        return videos
 
     def recommend_for_vid(self, video_id, length=10, update_db=True):
         idx = np.where(self.video_df["id"] == video_id)[0]
@@ -216,7 +231,7 @@ class Recommender:
         most_similar_with = [
             (
                 i,
-                consine_sim(self.vectors[idx], self.vectors[i])
+                consine_sim(safe_get_list(self.vectors, idx), safe_get_list(self.vectors, i))
             ) for i in range(len(self.vectors))
         ]
 
@@ -248,6 +263,7 @@ class Recommender:
 
 engine = Recommender()
 # engine.connect(app.mysql)
+# engine.allow_update()
 engine.load_vectors()
 engine.init_all_dataframe()
 

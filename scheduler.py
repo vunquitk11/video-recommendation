@@ -26,7 +26,7 @@ def update_recommender_data():
     engine.connect(app.mysql)
     # engine.load_vectors()
     engine.init_all_dataframe()
-    # engine.build_vectors()
+    engine.build_vectors()
     engine.save_all_dataframe()
 
     print(f"Finished in {datetime.datetime.now() - start}")
