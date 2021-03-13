@@ -16,9 +16,13 @@ tf_vectorizer = TfidfVectorizer(
     stop_words="english")
 
 def consine_sim(x1, x2):
-    if x1 is None or x2 is None:
+    try:
+        if x1 is None or x2 is None:
+            return 0
+
+        return 1 - scipy.spatial.distance.cosine(x1, x2)
+    except:
         return 0
-    return 1 - scipy.spatial.distance.cosine(x1, x2)
 
 
 def concat_feat(feats, mat):
@@ -136,6 +140,8 @@ class Recommender:
         data = np.array(data)
         df = pd.DataFrame(data)
 
+        print(f"Update {len(df)} records")
+
         df.columns = columns.split(",")
         return df
 
@@ -191,25 +197,36 @@ class Recommender:
         if not found_vids:
             return []
 
-        viewed_ids = [vid[0] for vid in found_vids]
+        viewed_ids = [vid[1] for vid in found_vids]
+        viewed_ids_origin = [vid[1] for vid in found_vids]
         sql = f"SELECT id,category_id from videos WHERE id IN ({','.join(to_str(viewed_ids))})"
         video_infos = self.find(sql)
         category_map = {v[0]: v[1] for v in video_infos}
 
         videos = []
 
-        for vid_id in viewed_ids:
-            videos += filter_viewed_videos(self.recommend_for_vid(vid_id, 10), viewed_ids)
+        for vid_id in viewed_ids_origin:
+            rec_vids = self.recommend_for_vid(vid_id, limit, skip_ids=viewed_ids)
+            for v in rec_vids:
+                viewed_ids.append(int(v["video_id"]))
+            videos += rec_vids
 
         while len(videos) < limit:
             rest = limit - len(videos)
-            videos += self.recommend_for_vid(videos[0]["video_id"], rest, update_db=False)
+            rec_vids = self.recommend_for_vid(videos[0]["video_id"], rest, update_db=False, skip_ids=viewed_ids)
+            for v in rec_vids:
+                viewed_ids.append(int(v["video_id"]))
+            videos += rec_vids
 
         # This function use for calculate category feature
         # weighted_by_category(videos, category_map) 
         sort_by_score(videos)
 
         videos = videos[:limit]
+
+        # Remove duplicate
+        # videos = [dict(v) for v in {tuple(v.items()) for v in videos}]
+
         try:
             rec_ids = f"[{','.join([str(vid['video_id']) for vid in videos])}]"
             # Insert to db
@@ -221,19 +238,26 @@ class Recommender:
 
         return videos
 
-    def recommend_for_vid(self, video_id, length=10, update_db=True):
+    def recommend_for_vid(self, video_id, length=10, update_db=True, skip_ids=[]):
         idx = np.where(self.video_df["id"] == video_id)[0]
         if idx:
-            ifx = idx[0]
+            idx = idx[0]
         else:
             return []
 
-        most_similar_with = [
-            (
-                i,
-                consine_sim(safe_get_list(self.vectors, idx), safe_get_list(self.vectors, i))
-            ) for i in range(len(self.vectors))
-        ]
+        most_similar_with = []
+
+        # Get viewed ids
+        skip_vids = self.video_df[self.video_df["id"].isin(skip_ids)]
+        skip_indices = list(skip_vids.index)
+
+        for i in range(len(self.vectors)):
+            # Skip this video
+            if i in skip_indices:
+                continue
+
+            sim = consine_sim(safe_get_list(self.vectors, idx), safe_get_list(self.vectors, i))
+            most_similar_with.append((i, sim))
 
         bests = sorted(most_similar_with, reverse=True, key=lambda x: x[1])[1: length + 1]
 
